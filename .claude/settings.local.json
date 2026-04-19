@@ -9,7 +9,18 @@
       "Bash(python -m pytest -v)",
       "Bash(python -c \"import app\")",
       "Bash(npx --yes @mermaid-js/mermaid-cli --version)",
-      "Bash(npx @mermaid-js/mermaid-cli -i uml_final.mmd -o uml_final.png --backgroundColor white)"
+      "Bash(npx @mermaid-js/mermaid-cli -i uml_final.mmd -o uml_final.png --backgroundColor white)",
+      "Bash(python -m pytest tests/test_ai_pipeline.py -v)",
+      "Bash(pip install *)",
+      "Bash(python -c \"import anthropic; print\\('ok'\\)\")",
+      "Bash(/opt/anaconda3/bin/pip install *)",
+      "Bash(python -m pytest tests/test_ai_pipeline.py tests/test_pawpal.py -v)",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(python -c \"import google.genai; print\\(google.genai.__file__\\)\")",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/pip install *)",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/python -c \"from google import genai; print\\('ok'\\)\")",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -c \"from google import genai; print\\('ok'\\)\")",
+      "Bash(python3.13 -c ' *)"
     ]
   }
 }

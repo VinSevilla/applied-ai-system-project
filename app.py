@@ -1,5 +1,9 @@
+import os
+
 import streamlit as st
-from pawpal_system import User, Pet, Task, Schedule
+
+import ai_pipeline
+from pawpal_system import Schedule, Task, Pet, User
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 st.title("🐾 PawPal+")
@@ -12,6 +16,18 @@ if "owner" not in st.session_state:
 
 if "next_pet_id" not in st.session_state:
     st.session_state.next_pet_id = 1
+
+# AI pipeline state
+if "ai_task_list" not in st.session_state:
+    st.session_state.ai_task_list = None
+if "ai_log_buffer" not in st.session_state:
+    st.session_state.ai_log_buffer = []
+if "ai_reasoning" not in st.session_state:
+    st.session_state.ai_reasoning = ""
+if "ai_warnings" not in st.session_state:
+    st.session_state.ai_warnings = []
+if "ai_schedule_applied" not in st.session_state:
+    st.session_state.ai_schedule_applied = False
 
 def _time_spinners(label, default_hour, default_minute, default_period, key_prefix):
     """Render hour / minute / AM-PM spinners and return total minutes from midnight."""
@@ -286,3 +302,174 @@ if st.button("Generate Schedule"):
 
         else:
             st.warning("No tasks could be placed — all time slots may be blocked.")
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# AI Schedule Generator
+# Pipeline: retrieve_context → generate_ai_schedule → evaluate_schedule
+#           → refinement loop → apply_ai_schedule → render in existing timeline
+# ---------------------------------------------------------------------------
+st.subheader("AI Schedule Generator")
+st.caption(
+    "Let AI plan the day for your pets based on their species, age, "
+    "your constraints, and built-in care guidelines."
+)
+
+if not os.getenv("GROQ_API_KEY"):
+    st.warning(
+        "Set the `GROQ_API_KEY` environment variable to enable the AI pipeline.  \n"
+        "Get a free key at **console.groq.com** → API Keys, then run:  \n"
+        "`export GROQ_API_KEY=your-key` and restart the app."
+    )
+elif not owner.user_pets:
+    st.info("Add at least one pet above before using the AI generator.")
+else:
+    # ── Human Review feedback box (persists between runs) ─────────────────
+    human_feedback = st.text_input(
+        "Optional — request specific changes "
+        "(e.g. 'more exercise for Buddy, move dinner to 7pm')",
+        value="",
+        key="human_feedback_input",
+        placeholder="Leave blank to let the AI decide",
+    )
+
+    col_run, col_status = st.columns([1, 3])
+    with col_run:
+        run_ai = st.button("Generate with AI", type="primary")
+
+    # ── Run the pipeline ──────────────────────────────────────────────────
+    if run_ai:
+        with col_status:
+            st.caption("Running: retrieve → plan → evaluate → refine…")
+
+        try:
+            with st.spinner("AI pipeline running…"):
+                task_list, log_entries, reasoning = ai_pipeline.run_pipeline(
+                    owner,
+                    max_iterations=3,
+                    human_feedback=human_feedback,
+                )
+                place_warnings = ai_pipeline.apply_ai_schedule(owner, task_list)
+                owner.update_pet_maintenance()
+
+            # Save results into session state so they survive the rerun
+            st.session_state.ai_task_list = task_list
+            st.session_state.ai_log_buffer = log_entries
+            st.session_state.ai_reasoning = reasoning
+            st.session_state.ai_warnings = place_warnings
+            st.session_state.ai_schedule_applied = True
+            st.rerun()
+
+        except Exception as exc:
+            msg = str(exc)
+            if "api_key" in msg.lower() or "api key" in msg.lower() or "authentication" in msg.lower():
+                st.error(
+                    "Invalid API key. Check that `ANTHROPIC_API_KEY` is set correctly "
+                    "and restart the app."
+                )
+            else:
+                st.error(f"Pipeline error: {msg}")
+
+    # ── Display the AI-generated schedule ────────────────────────────────
+    if st.session_state.ai_schedule_applied and owner.user_schedule._placed:
+        st.success("AI schedule generated and applied to your timeline!")
+
+        id_to_name = {p.id: p.name for p in owner.user_pets}
+
+        # Build the same merged table format as the manual generator
+        task_entries = [
+            {
+                "Time": f"{Schedule._to_time(start)} – {Schedule._to_time(start + t.duration)}",
+                "Task": t.task_name,
+                "Duration (min)": t.duration,
+                "Priority": t.priority,
+                "Pet": id_to_name.get(t.pet_id, "?"),
+                "Status": t.status,
+                "_sort": start,
+            }
+            for start, t in owner.user_schedule.sort_by_time()
+        ]
+        constraint_entries = [
+            {
+                "Time": f"{Schedule._to_time(b_start)} – {Schedule._to_time(b_end)}",
+                "Task": f"🚫 {owner.user_schedule.blocked_labels[i]}",
+                "Duration (min)": b_end - b_start,
+                "Priority": "—",
+                "Pet": "—",
+                "Status": "blocked",
+                "_sort": b_start,
+            }
+            for i, (b_start, b_end) in enumerate(owner.user_schedule.blocked_times)
+        ]
+        rows = sorted(task_entries + constraint_entries, key=lambda r: r["_sort"])
+        for r in rows:
+            del r["_sort"]
+        st.table(rows)
+
+        # AI reasoning
+        if st.session_state.ai_reasoning:
+            with st.expander("AI Reasoning", expanded=False):
+                st.write(st.session_state.ai_reasoning)
+
+        # Placement warnings (unknown pet names, bad time strings, etc.)
+        for w in st.session_state.ai_warnings:
+            st.warning(w)
+
+        # Maintenance levels
+        st.write("**Pet Maintenance Levels (AI Schedule):**")
+        st.table([
+            {"Pet": p.name, "Maintenance Score": f"{p.maintenance_level}/5"}
+            for p in owner.user_pets
+        ])
+
+        # ── Pipeline Log ─────────────────────────────────────────────────
+        with st.expander("Pipeline Log", expanded=False):
+            st.caption(
+                "Each row is one step the AI pipeline logged. "
+                "Expand to audit retrieve → plan → evaluate → apply."
+            )
+            for entry in st.session_state.ai_log_buffer:
+                st.markdown(
+                    f"`{entry['timestamp']}` &nbsp; **{entry['step']}**"
+                )
+                data = entry["data"]
+                if isinstance(data, str):
+                    # Truncate long prompts so the log stays readable
+                    st.text(data[:400] + ("…" if len(data) > 400 else ""))
+                else:
+                    st.json(data)
+
+    elif st.session_state.ai_schedule_applied:
+        st.warning(
+            "The AI pipeline ran but no tasks were placed. "
+            "Check that your pets are set up and the schedule window is open."
+        )
+
+    st.divider()
+
+    # ── Human Review — request another pass ───────────────────────────────
+    st.subheader("Request Changes")
+    st.caption(
+        "Not happy with the AI schedule? Describe what to change above "
+        "and click 'Generate with AI' again."
+    )
+
+    # ── Reliability Tests ─────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Reliability Tests")
+    st.caption("Runs predefined test cases against pipeline logic — no API calls made.")
+
+    if st.button("Run Tests"):
+        test_results = ai_pipeline.run_reliability_tests()
+        passed = sum(1 for r in test_results if r["passed"])
+        failed = [r for r in test_results if not r["passed"]]
+
+        st.write(f"**{passed} / {len(test_results)} tests passed**")
+        for r in test_results:
+            icon = "✅" if r["passed"] else "❌"
+            detail = r["detail"][:120] + ("…" if len(r["detail"]) > 120 else "")
+            st.write(f"{icon} `{r['test']}` — {detail}")
+
+        if failed:
+            st.error(f"{len(failed)} test(s) failed — see details above.")
