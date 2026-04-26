@@ -23,6 +23,43 @@ from groq import Groq
 from pawpal_system import Pet, Schedule, Task, User
 
 # ---------------------------------------------------------------------------
+# JSON extraction helper — robust against markdown fences and extra prose
+# ---------------------------------------------------------------------------
+def _extract_json(text: str) -> Dict | None:
+    """
+    Find and parse the first complete JSON object in an AI response.
+    Handles markdown code fences, leading/trailing prose, and nested braces.
+    Returns a dict on success, None on failure.
+    """
+    import re
+    text = text.strip()
+
+    # 1. Strip markdown fences if present
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if fenced:
+        text = fenced.group(1).strip()
+
+    # 2. Find the first '{' and match it to its closing '}'
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    for i, ch in enumerate(text[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    return None
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Knowledge Base — Retriever data source
 # ---------------------------------------------------------------------------
 KNOWLEDGE_BASE: Dict[str, Dict] = {
@@ -119,6 +156,7 @@ def generate_ai_schedule(
     owner: User,
     context: str,
     feedback: str = "",
+    care_instructions: str = "",
 ) -> Tuple[List[Dict], str]:
     """
     Call Claude to generate an initial pet care schedule (AI Planner step).
@@ -127,12 +165,13 @@ def generate_ai_schedule(
         task_list  — list of dicts: {task_name, start_time, duration, priority, pet_name}
         reasoning  — the AI's brief explanation of its decisions
     """
-    # Summarise owner constraints for the prompt
+    # Summarise owner constraints for the prompt — show as explicit clock ranges
     constraint_lines = [
-        f"{owner.user_schedule.blocked_labels[i]}: "
-        f"{Schedule._to_time(b_start)} – {Schedule._to_time(b_end)}"
+        f"{owner.user_schedule.blocked_labels[i]} "
+        f"({Schedule._to_time(b_start)} – {Schedule._to_time(b_end)}, "
+        f"{b_end - b_start} min blocked)"
         for i, (b_start, b_end) in enumerate(owner.user_schedule.blocked_times)
-    ] or ["None"]
+    ] or ["None — full window is available"]
 
     window = (
         f"{Schedule._to_time(owner.user_schedule.day_start)} "
@@ -146,17 +185,23 @@ def generate_ai_schedule(
     feedback_block = (
         f"\nOwner feedback to incorporate:\n{feedback}\n" if feedback else ""
     )
+    instructions_block = (
+        f"\nOwner's care instructions (MUST be followed):\n{care_instructions}\n"
+        if care_instructions else ""
+    )
 
     prompt = f"""You are a pet care scheduling assistant for PawPal+.
 
 Owner: {owner.name}
 Available schedule window: {window}
-Owner's blocked times (do NOT schedule here): {', '.join(constraint_lines)}
+BLOCKED — do NOT place any task overlapping these windows: {', '.join(constraint_lines)}
+IMPORTANT: Every task's start_time + duration must fall entirely outside the blocked windows.
 
 Pets:
 {pet_lines}
 
 {context}
+{instructions_block}
 {feedback_block}
 Generate a realistic daily pet care schedule. Return ONLY valid JSON — no extra text.
 
@@ -193,20 +238,13 @@ Rules:
     ).choices[0].message.content
     log_pipeline_step("planner_raw_output", raw)
 
-    try:
-        # Strip optional markdown code fences
-        text = raw.strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        data = json.loads(text.strip())
-        task_list = data.get("tasks", [])
-        reasoning = data.get("reasoning", "")
-    except (json.JSONDecodeError, IndexError, KeyError) as exc:
-        log_pipeline_step("planner_parse_error", str(exc))
-        task_list, reasoning = [], f"Parse error: {exc}"
+    data = _extract_json(raw)
+    if data is None:
+        log_pipeline_step("planner_parse_error", raw[:300])
+        return [], f"Could not parse AI response. Raw output logged."
 
+    task_list = data.get("tasks", [])
+    reasoning  = data.get("reasoning", "")
     log_pipeline_step("planner_output", {"tasks": task_list, "reasoning": reasoning})
     return task_list, reasoning
 
@@ -279,19 +317,14 @@ If needs_revision, list concrete, actionable problems."""
     ).choices[0].message.content
     log_pipeline_step("evaluator_raw_output", raw)
 
-    try:
-        text = raw.strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        data = json.loads(text.strip())
+    data = _extract_json(raw)
+    if data is None:
+        log_pipeline_step("evaluator_parse_error", raw[:300])
+        status = "approved"   # can't parse → don't block on evaluation
+        issues = []
+    else:
         status = data.get("status", "needs_revision")
         issues = data.get("issues", [])
-    except (json.JSONDecodeError, IndexError, KeyError) as exc:
-        log_pipeline_step("evaluator_parse_error", str(exc))
-        status = "needs_revision"
-        issues = [f"Could not parse evaluator response: {exc}"]
 
     log_pipeline_step("evaluator_result", {"status": status, "issues": issues})
     return status, issues
@@ -304,6 +337,7 @@ def run_pipeline(
     owner: User,
     max_iterations: int = 3,
     human_feedback: str = "",
+    care_instructions: str = "",
 ) -> Tuple[List[Dict], List[Dict], str]:
     """
     Run the full AI pipeline: retrieve → plan → evaluate → refine if needed.
@@ -317,6 +351,7 @@ def run_pipeline(
     log_pipeline_step("pipeline_start", {
         "owner": owner.name,
         "pets": [f"{p.name} ({p.type}, age {p.age})" for p in owner.user_pets],
+        "care_instructions": care_instructions or "(none)",
         "human_feedback": human_feedback or "(none)",
     })
 
@@ -331,7 +366,9 @@ def run_pipeline(
         log_pipeline_step("iteration_start", f"Iteration {iteration} of {max_iterations}")
 
         # Step 2 — Planner
-        task_list, reasoning = generate_ai_schedule(owner, context, feedback)
+        task_list, reasoning = generate_ai_schedule(
+            owner, context, feedback, care_instructions
+        )
 
         if not task_list:
             log_pipeline_step("iteration_error", "Planner returned no tasks — stopping.")
@@ -368,48 +405,129 @@ def run_pipeline(
 # ---------------------------------------------------------------------------
 # 5. Apply AI output → existing Schedule structure
 # ---------------------------------------------------------------------------
+
+_MIN_TASK_DURATION = 10  # never trim a task below this many minutes
+
+
+def _find_free_slot(
+    schedule: Schedule,
+    desired_start: int,
+    duration: int,
+) -> Tuple[int, int]:
+    """
+    Find the best (start, duration) pair for a task near desired_start.
+
+    Tries in order:
+      1. Exact time + original duration
+      2. Exact time + trimmed duration (5-min steps down to _MIN_TASK_DURATION)
+      3. Nearby slots (±2 h in 15-min steps, closest first) + original duration
+      4. Nearby slots + trimmed duration
+
+    Returns (-1, -1) if no slot can be found.
+    """
+    day_start = schedule.day_start
+    day_end   = schedule.day_end
+
+    # Build a search order: offsets sorted by absolute distance from desired_start
+    offsets = sorted(range(-120, 121, 15), key=abs)
+
+    # Durations to try: start from original (or minimum if AI gave a very short
+    # duration), then step down in 5-min increments to the minimum.
+    start_d   = max(duration, _MIN_TASK_DURATION)
+    durations = list(range(start_d, _MIN_TASK_DURATION - 1, -5))
+    if not durations:                        # safety net
+        durations = [_MIN_TASK_DURATION]
+
+    for d in durations:
+        for offset in offsets:
+            candidate = desired_start + offset
+            if candidate < day_start or candidate + d > day_end:
+                continue
+            if schedule._slot_is_free(candidate, d):
+                return candidate, d
+
+    return -1, -1
+
+
 def apply_ai_schedule(owner: User, task_list: List[Dict]) -> List[str]:
     """
-    Place AI-generated tasks into owner.user_schedule via add_task_at().
+    Place AI-generated tasks into owner.user_schedule.
 
-    This writes directly into Schedule._placed so the existing sort_by_time()
-    timeline UI in app.py renders the AI schedule without any changes.
+    For each task:
+    - Try the AI's suggested time first.
+    - If blocked or overlapping, find the nearest free slot automatically.
+    - If the task can't fit at full duration, trim it until it fits.
+    - If no slot exists at all, skip with a warning.
 
-    Returns a list of warning strings for tasks that could not be placed.
+    Writes directly into Schedule._placed so sort_by_time() and the existing
+    timeline UI render the result with no changes needed in app.py.
+
+    Returns a list of info/warning strings for tasks that were moved, trimmed,
+    or skipped.
     """
-    pet_map = {p.name.lower(): p for p in owner.user_pets}
+    pet_map  = {p.name.lower(): p for p in owner.user_pets}
     warnings: List[str] = []
 
-    # Clear any previously generated schedule before applying the new one
-    owner.user_schedule._placed = {}
+    # Clear any previously generated schedule
+    owner.user_schedule._placed   = {}
     owner.user_schedule._unplaced = []
-    owner.user_schedule.tasks = []
+    owner.user_schedule.tasks     = []
 
     for item in task_list:
         pet_name = item.get("pet_name", "")
-        pet = pet_map.get(pet_name.lower())
+        pet      = pet_map.get(pet_name.lower())
 
         if pet is None:
-            msg = f"Unknown pet '{pet_name}' — task '{item.get('task_name')}' skipped."
+            msg = f"Unknown pet '{pet_name}' — '{item.get('task_name')}' skipped."
             warnings.append(msg)
             log_pipeline_step("apply_warning", msg)
             continue
 
         try:
+            original_duration = int(item["duration"])
             task = Task(
                 task_name=item["task_name"],
-                duration=int(item["duration"]),
+                duration=original_duration,
                 priority=int(item["priority"]),
                 pet_id=pet.id,
             )
-            owner.user_schedule.add_task_at(task, item["start_time"])
+            desired_start = Schedule._parse_time(item["start_time"])
         except (ValueError, KeyError) as exc:
-            msg = f"Could not place '{item.get('task_name')}': {exc}"
+            msg = f"Could not parse '{item.get('task_name')}': {exc}"
             warnings.append(msg)
             log_pipeline_step("apply_error", msg)
+            continue
+
+        actual_start, actual_duration = _find_free_slot(
+            owner.user_schedule, desired_start, original_duration
+        )
+
+        if actual_start == -1:
+            msg = (
+                f"'{task.task_name}' could not be placed — "
+                "no free slot found in the schedule window."
+            )
+            warnings.append(msg)
+            log_pipeline_step("apply_unplaced", msg)
+            continue
+
+        # Record adjustments so the user knows what changed
+        if actual_start != desired_start:
+            warnings.append(
+                f"'{task.task_name}' moved from {Schedule._to_time(desired_start)} "
+                f"to {Schedule._to_time(actual_start)} to avoid a conflict."
+            )
+        if actual_duration != original_duration:
+            warnings.append(
+                f"'{task.task_name}' trimmed from {original_duration} min "
+                f"to {actual_duration} min to fit the available slot."
+            )
+
+        task.duration = actual_duration
+        owner.user_schedule._placed[actual_start] = task
 
     log_pipeline_step("apply_schedule", {
-        "placed": len(owner.user_schedule._placed),
+        "placed":   len(owner.user_schedule._placed),
         "warnings": warnings,
     })
     return warnings

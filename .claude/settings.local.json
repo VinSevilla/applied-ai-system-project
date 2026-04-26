@@ -20,7 +20,13 @@
       "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/pip install *)",
       "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/python -c \"from google import genai; print\\('ok'\\)\")",
       "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -c \"from google import genai; print\\('ok'\\)\")",
-      "Bash(python3.13 -c ' *)"
+      "Bash(python3.13 -c ' *)",
+      "Bash(git restore *)",
+      "Bash(python3.13 -c \"import app\")",
+      "Bash(python3.13 -m py_compile app.py)",
+      "Bash(python3.13 -m py_compile app.py ai_pipeline.py)",
+      "Bash(python3.13 -m py_compile ai_pipeline.py app.py)",
+      "Bash(python3.13 -m pytest tests/ -q)"
     ]
   }
 }

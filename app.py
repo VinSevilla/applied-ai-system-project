@@ -3,7 +3,7 @@ import os
 import streamlit as st
 
 import ai_pipeline
-from pawpal_system import Schedule, Task, Pet, User
+from pawpal_system import Schedule, Pet, User
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 st.title("🐾 PawPal+")
@@ -28,6 +28,8 @@ if "ai_warnings" not in st.session_state:
     st.session_state.ai_warnings = []
 if "ai_schedule_applied" not in st.session_state:
     st.session_state.ai_schedule_applied = False
+if "care_instructions" not in st.session_state:
+    st.session_state.care_instructions = ""
 
 def _time_spinners(label, default_hour, default_minute, default_period, key_prefix):
     """Render hour / minute / AM-PM spinners and return total minutes from midnight."""
@@ -182,126 +184,35 @@ if owner.user_schedule.blocked_times:
 st.divider()
 
 # ---------------------------------------------------------------------------
-# Add a Care Task  →  owner.user_schedule.add_task(Task(...))
+# Care Instructions — free-text requests fed into the AI planner
 # ---------------------------------------------------------------------------
-st.subheader("Add a Care Task")
+st.subheader("Care Instructions")
+st.caption("Describe what you need done for each pet. The AI will turn this into a schedule.")
 
-if not owner.user_pets:
-    st.warning("Add a pet first before scheduling tasks.")
-else:
-    pet_map = {p.name: p for p in owner.user_pets}
+care_instructions = st.text_area(
+    "What should the AI plan for your pets?",
+    value=st.session_state.care_instructions,
+    placeholder=(
+        "e.g. Feed Mochi twice a day, give Garfield his medicine at 8am, "
+        "walk Buddy in the morning and evening, groom Mochi once today"
+    ),
+    height=100,
+    key="care_instructions_input",
+)
 
-    with st.form("add_task_form"):
-        task_name    = st.text_input("Task name", value="Morning Walk")
-        duration     = st.number_input("Duration (minutes)", min_value=1, max_value=240, value=30)
-        priority     = st.slider("Priority (1 = low, 5 = high)", min_value=1, max_value=5, value=3)
-        selected_pet = st.selectbox("For which pet?", list(pet_map.keys()))
-        task_submitted = st.form_submit_button("Add Task")
+if care_instructions != st.session_state.care_instructions:
+    st.session_state.care_instructions = care_instructions
 
-    if task_submitted:
-        pet = pet_map[selected_pet]
-        new_task = Task(
-            task_name=task_name,
-            duration=int(duration),
-            priority=priority,
-            pet_id=pet.id
-        )
-        owner.user_schedule.add_task(new_task)    # <-- Schedule class method
-        st.success(f"Task '{task_name}' added for {selected_pet}!")
-
-    # Show the unscheduled task pool
-    if owner.user_schedule.tasks:
-        id_to_name = {p.id: p.name for p in owner.user_pets}
-        st.write("**Task pool (not yet scheduled):**")
-        t_headers = st.columns([3, 2, 1, 2, 1])
-        for header, label in zip(t_headers, ["Task", "Duration (min)", "Priority", "Pet", ""]):
-            header.markdown(f"**{label}**")
-        for i, t in enumerate(list(owner.user_schedule.tasks)):
-            c1, c2, c3, c4, c5 = st.columns([3, 2, 1, 2, 1])
-            c1.write(t.task_name)
-            c2.write(t.duration)
-            c3.write(t.priority)
-            c4.write(id_to_name.get(t.pet_id, "?"))
-            if c5.button("✕", key=f"del_task_{i}"):
-                owner.user_schedule.tasks.pop(i)
-                st.rerun()
-
-st.divider()
-
-# ---------------------------------------------------------------------------
-# Generate Schedule  →  generate_schedule() + update_pet_maintenance()
-# ---------------------------------------------------------------------------
-st.subheader("Generate Daily Schedule")
-
-if st.button("Generate Schedule"):
-    if not owner.user_schedule.tasks:
-        st.warning("Add some tasks first.")
-    else:
-        owner.user_schedule.generate_schedule()     # <-- Schedule class method
-        owner.update_pet_maintenance()              # <-- User class method (updates maintenance_level)
-
-        placed = owner.user_schedule._placed
-        if placed:
-            st.success("Schedule generated successfully!")
-            id_to_name = {p.id: p.name for p in owner.user_pets}
-
-            # --- Sorted schedule table (tasks + blocked constraints merged by time) ---
-            task_entries = [
-                {
-                    "Time": f"{Schedule._to_time(start)} – {Schedule._to_time(start + t.duration)}",
-                    "Task": t.task_name,
-                    "Duration (min)": t.duration,
-                    "Priority": t.priority,
-                    "Pet": id_to_name.get(t.pet_id, "?"),
-                    "Status": t.status,
-                    "_sort": start,
-                }
-                for start, t in owner.user_schedule.sort_by_time()
-            ]
-            constraint_entries = [
-                {
-                    "Time": f"{Schedule._to_time(b_start)} – {Schedule._to_time(b_end)}",
-                    "Task": f"🚫 {owner.user_schedule.blocked_labels[i]}",
-                    "Duration (min)": b_end - b_start,
-                    "Priority": "—",
-                    "Pet": "—",
-                    "Status": "blocked",
-                    "_sort": b_start,
-                }
-                for i, (b_start, b_end) in enumerate(owner.user_schedule.blocked_times)
-            ]
-            rows = sorted(task_entries + constraint_entries, key=lambda r: r["_sort"])
-            for r in rows:
-                del r["_sort"]
-            st.table(rows)
-
-            # --- Conflict warnings (uses detect_conflicts()) ---
-            conflicts = owner.user_schedule.detect_conflicts()        # <-- Schedule.detect_conflicts()
-            if conflicts:
-                st.warning(f"⚠️ {len(conflicts)} scheduling conflict(s) detected:")
-                for msg in conflicts:
-                    st.warning(msg)
-            else:
-                st.success("No scheduling conflicts — all tasks fit cleanly!")
-
-            # --- Unplaced tasks (uses check_conflicts()) ---
-            unplaced = owner.user_schedule.check_conflicts()          # <-- Schedule.check_conflicts()
-            if unplaced:
-                st.warning(f"⚠️ {len(unplaced)} task(s) could not be placed (no free slot found):")
-                for t in unplaced:
-                    st.warning(f"  • {t.task_name} ({t.duration} min, priority {t.priority})")
-
-            # --- Maintenance levels ---
-            st.write("**Pet Maintenance Levels:**")
-            maint_rows = [
-                {"Pet": p.name, "Maintenance Score": f"{p.maintenance_level}/5"}
-                for p in owner.user_pets
-            ]
-            st.table(maint_rows)
-
-
-        else:
-            st.warning("No tasks could be placed — all time slots may be blocked.")
+# Show interpreted bullet points as confirmation whenever there is text
+if st.session_state.care_instructions.strip():
+    import re as _re
+    # Split on commas, semicolons, or newlines to get individual instructions
+    raw_items = _re.split(r"[,;\n]+", st.session_state.care_instructions)
+    items = [i.strip().rstrip(".").strip() for i in raw_items if i.strip()]
+    if items:
+        st.success("Care instructions saved — the AI will plan around these:")
+        for item in items:
+            st.markdown(f"&nbsp;&nbsp;• {item}")
 
 st.divider()
 
@@ -316,6 +227,33 @@ st.caption(
     "your constraints, and built-in care guidelines."
 )
 
+def _run_pipeline(feedback: str = ""):
+    """Run the AI pipeline and save results to session state."""
+    try:
+        with st.spinner("AI pipeline running…"):
+            task_list, log_entries, reasoning = ai_pipeline.run_pipeline(
+                owner,
+                max_iterations=3,
+                human_feedback=feedback,
+                care_instructions=st.session_state.care_instructions,
+            )
+            place_warnings = ai_pipeline.apply_ai_schedule(owner, task_list)
+            owner.update_pet_maintenance()
+
+        st.session_state.ai_task_list = task_list
+        st.session_state.ai_log_buffer = log_entries
+        st.session_state.ai_reasoning = reasoning
+        st.session_state.ai_warnings = place_warnings
+        st.session_state.ai_schedule_applied = True
+        st.rerun()
+
+    except Exception as exc:
+        msg = str(exc)
+        if "api_key" in msg.lower() or "api key" in msg.lower() or "authentication" in msg.lower():
+            st.error("Invalid API key. Check that `GROQ_API_KEY` is set correctly and restart the app.")
+        else:
+            st.error(f"Pipeline error: {msg}")
+
 if not os.getenv("GROQ_API_KEY"):
     st.warning(
         "Set the `GROQ_API_KEY` environment variable to enable the AI pipeline.  \n"
@@ -325,59 +263,16 @@ if not os.getenv("GROQ_API_KEY"):
 elif not owner.user_pets:
     st.info("Add at least one pet above before using the AI generator.")
 else:
-    # ── Human Review feedback box (persists between runs) ─────────────────
-    human_feedback = st.text_input(
-        "Optional — request specific changes "
-        "(e.g. 'more exercise for Buddy, move dinner to 7pm')",
-        value="",
-        key="human_feedback_input",
-        placeholder="Leave blank to let the AI decide",
-    )
-
-    col_run, col_status = st.columns([1, 3])
-    with col_run:
-        run_ai = st.button("Generate with AI", type="primary")
-
-    # ── Run the pipeline ──────────────────────────────────────────────────
-    if run_ai:
-        with col_status:
-            st.caption("Running: retrieve → plan → evaluate → refine…")
-
-        try:
-            with st.spinner("AI pipeline running…"):
-                task_list, log_entries, reasoning = ai_pipeline.run_pipeline(
-                    owner,
-                    max_iterations=3,
-                    human_feedback=human_feedback,
-                )
-                place_warnings = ai_pipeline.apply_ai_schedule(owner, task_list)
-                owner.update_pet_maintenance()
-
-            # Save results into session state so they survive the rerun
-            st.session_state.ai_task_list = task_list
-            st.session_state.ai_log_buffer = log_entries
-            st.session_state.ai_reasoning = reasoning
-            st.session_state.ai_warnings = place_warnings
-            st.session_state.ai_schedule_applied = True
-            st.rerun()
-
-        except Exception as exc:
-            msg = str(exc)
-            if "api_key" in msg.lower() or "api key" in msg.lower() or "authentication" in msg.lower():
-                st.error(
-                    "Invalid API key. Check that `ANTHROPIC_API_KEY` is set correctly "
-                    "and restart the app."
-                )
-            else:
-                st.error(f"Pipeline error: {msg}")
+    # ── Generate button ───────────────────────────────────────────────────
+    if st.button("Generate with AI", type="primary"):
+        _run_pipeline()
 
     # ── Display the AI-generated schedule ────────────────────────────────
     if st.session_state.ai_schedule_applied and owner.user_schedule._placed:
-        st.success("AI schedule generated and applied to your timeline!")
+        st.success("AI schedule generated!")
 
         id_to_name = {p.id: p.name for p in owner.user_pets}
 
-        # Build the same merged table format as the manual generator
         task_entries = [
             {
                 "Time": f"{Schedule._to_time(start)} – {Schedule._to_time(start + t.duration)}",
@@ -407,53 +302,52 @@ else:
             del r["_sort"]
         st.table(rows)
 
-        # AI reasoning
         if st.session_state.ai_reasoning:
             with st.expander("AI Reasoning", expanded=False):
                 st.write(st.session_state.ai_reasoning)
 
-        # Placement warnings (unknown pet names, bad time strings, etc.)
         for w in st.session_state.ai_warnings:
             st.warning(w)
 
-        # Maintenance levels
-        st.write("**Pet Maintenance Levels (AI Schedule):**")
+        st.write("**Pet Maintenance Levels:**")
         st.table([
             {"Pet": p.name, "Maintenance Score": f"{p.maintenance_level}/5"}
             for p in owner.user_pets
         ])
 
-        # ── Pipeline Log ─────────────────────────────────────────────────
         with st.expander("Pipeline Log", expanded=False):
-            st.caption(
-                "Each row is one step the AI pipeline logged. "
-                "Expand to audit retrieve → plan → evaluate → apply."
-            )
             for entry in st.session_state.ai_log_buffer:
-                st.markdown(
-                    f"`{entry['timestamp']}` &nbsp; **{entry['step']}**"
-                )
+                st.markdown(f"`{entry['timestamp']}` &nbsp; **{entry['step']}**")
                 data = entry["data"]
                 if isinstance(data, str):
-                    # Truncate long prompts so the log stays readable
                     st.text(data[:400] + ("…" if len(data) > 400 else ""))
                 else:
                     st.json(data)
+
+        # ── Human Review ─────────────────────────────────────────────────
+        st.divider()
+        st.subheader("Request Changes")
+        st.caption("Describe what you'd like to change and the AI will regenerate the schedule.")
+
+        with st.form("request_changes_form"):
+            change_request = st.text_area(
+                "What would you like to change?",
+                placeholder="e.g. more exercise for Buddy, move dinner to 7pm, add a grooming session",
+                height=80,
+            )
+            apply_changes = st.form_submit_button("Apply Changes", type="primary")
+
+        if apply_changes:
+            if change_request.strip():
+                _run_pipeline(feedback=change_request.strip())
+            else:
+                st.warning("Please describe the changes you'd like before submitting.")
 
     elif st.session_state.ai_schedule_applied:
         st.warning(
             "The AI pipeline ran but no tasks were placed. "
             "Check that your pets are set up and the schedule window is open."
         )
-
-    st.divider()
-
-    # ── Human Review — request another pass ───────────────────────────────
-    st.subheader("Request Changes")
-    st.caption(
-        "Not happy with the AI schedule? Describe what to change above "
-        "and click 'Generate with AI' again."
-    )
 
     # ── Reliability Tests ─────────────────────────────────────────────────
     st.divider()
