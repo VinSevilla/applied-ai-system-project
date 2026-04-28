@@ -26,7 +26,15 @@
       "Bash(python3.13 -m py_compile app.py)",
       "Bash(python3.13 -m py_compile app.py ai_pipeline.py)",
       "Bash(python3.13 -m py_compile ai_pipeline.py app.py)",
-      "Bash(python3.13 -m pytest tests/ -q)"
+      "Bash(python3.13 -m pytest tests/ -q)",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(python -c \"import groq; print\\('groq ok'\\)\")",
+      "Bash(/opt/anaconda3/bin/python -c \"import groq; print\\('groq ok'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(streamlit --version)",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/pip3.13 install *)",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -c \"from spellchecker import SpellChecker; s=SpellChecker\\(\\); print\\(s.correction\\('givee'\\)\\)\")",
+      "Bash(/opt/anaconda3/bin/python -m pytest tests/ -q)"
     ]
   }
 }

@@ -203,16 +203,17 @@ care_instructions = st.text_area(
 if care_instructions != st.session_state.care_instructions:
     st.session_state.care_instructions = care_instructions
 
-# Show interpreted bullet points as confirmation whenever there is text
-if st.session_state.care_instructions.strip():
-    import re as _re
-    # Split on commas, semicolons, or newlines to get individual instructions
-    raw_items = _re.split(r"[,;\n]+", st.session_state.care_instructions)
-    items = [i.strip().rstrip(".").strip() for i in raw_items if i.strip()]
-    if items:
-        st.success("Care instructions saved — the AI will plan around these:")
-        for item in items:
-            st.markdown(f"&nbsp;&nbsp;• {item}")
+# Show pre-parsed task intents so the user sees exactly what was interpreted
+if st.session_state.care_instructions.strip() and owner.user_pets:
+    intents = ai_pipeline._parse_care_instructions(
+        st.session_state.care_instructions, owner.user_pets
+    )
+    if intents:
+        st.success("Care instructions accepted — tasks interpreted:")
+        for t in intents:
+            combined_note = " *(shared slot)*" if t["combined"] else ""
+            time_note = f" at {t['time_hint']}" if t["time_hint"] else ""
+            st.markdown(f"&nbsp;&nbsp;• **{t['task_name']}** → {t['pet_label']}{time_note}{combined_note}")
 
 st.divider()
 
@@ -279,7 +280,8 @@ else:
                 "Task": t.task_name,
                 "Duration (min)": t.duration,
                 "Priority": t.priority,
-                "Pet": id_to_name.get(t.pet_id, "?"),
+                # Use _display_pets if set (merged multi-pet slot), else fall back to single pet name
+                "Pet": getattr(t, "_display_pets", None) or id_to_name.get(t.pet_id, "?"),
                 "Status": t.status,
                 "_sort": start,
             }
@@ -298,9 +300,39 @@ else:
             for i, (b_start, b_end) in enumerate(owner.user_schedule.blocked_times)
         ]
         rows = sorted(task_entries + constraint_entries, key=lambda r: r["_sort"])
-        for r in rows:
-            del r["_sort"]
-        st.table(rows)
+
+        # Header
+        h = st.columns([2, 2, 1, 1, 2, 1])
+        for col, lbl in zip(h, ["Time", "Task", "Min", "Pri", "Pet", "Status"]):
+            col.markdown(f"**{lbl}**")
+        st.divider()
+
+        for row in rows:
+            start_min = row["_sort"]
+            is_blocked = row["Status"] == "blocked"
+            task_obj = owner.user_schedule._placed.get(start_min)
+
+            c = st.columns([2, 2, 1, 1, 2, 1])
+            c[0].write(row["Time"])
+            c[1].write(row["Task"])
+            c[2].write(row["Duration (min)"])
+            c[3].write(row["Priority"])
+            c[4].write(row["Pet"])
+
+            if is_blocked:
+                c[5].write("🚫 blocked")
+            elif task_obj:
+                is_done = task_obj.status == "complete"
+                if is_done:
+                    if c[5].button("✅ Done", key=f"undo_{start_min}"):
+                        task_obj.status = "pending"
+                        st.rerun()
+                else:
+                    if c[5].button("Mark done", key=f"done_{start_min}"):
+                        task_obj.mark_complete()
+                        st.rerun()
+            else:
+                c[5].write(row["Status"])
 
         if st.session_state.ai_reasoning:
             with st.expander("AI Reasoning", expanded=False):
