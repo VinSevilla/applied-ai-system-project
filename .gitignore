@@ -2,4 +2,6 @@ __pycache__/
 .venv/
 .venv_new/
 .pytest_cache/
-.DS_Storelogs/
+.DS_Store
+logs/
+.claude/
