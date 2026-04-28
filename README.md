@@ -8,6 +8,10 @@
 
 The app runs entirely in a web browser via [Streamlit](https://streamlit.io) and uses the [Groq](https://console.groq.com) API for fast LLM inference at no cost on the free tier.
 
+## Demo Walkthrough
+
+[Watch the full walkthrough on Loom](https://www.loom.com/share/e65ea27175aa471e8c3d51df96869533)
+
 ---
 
 ## Architecture Overview
