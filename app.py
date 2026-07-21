@@ -263,6 +263,8 @@ if not os.getenv("GROQ_API_KEY"):
     )
 elif not owner.user_pets:
     st.info("Add at least one pet above before using the AI generator.")
+elif not st.session_state.care_instructions.strip():
+    st.info("Add care instructions above so the AI knows what to schedule for your pets.")
 else:
     # ── Generate button ───────────────────────────────────────────────────
     if st.button("Generate with AI", type="primary"):
@@ -376,10 +378,27 @@ else:
                 st.warning("Please describe the changes you'd like before submitting.")
 
     elif st.session_state.ai_schedule_applied:
-        st.warning(
-            "The AI pipeline ran but no tasks were placed. "
-            "Check that your pets are set up and the schedule window is open."
-        )
+        task_count = len(st.session_state.ai_task_list or [])
+        if task_count == 0:
+            st.warning(
+                "The AI returned no tasks. Make sure your care instructions describe "
+                "specific tasks (e.g. 'Feed Mochi twice a day, walk Buddy in the morning')."
+            )
+        else:
+            st.warning(
+                f"The AI generated {task_count} task(s) but none could be placed. "
+                "Check the details below."
+            )
+        for w in (st.session_state.ai_warnings or []):
+            st.error(w)
+        with st.expander("Pipeline Log", expanded=True):
+            for entry in (st.session_state.ai_log_buffer or []):
+                st.markdown(f"`{entry['timestamp']}` &nbsp; **{entry['step']}**")
+                data = entry["data"]
+                if isinstance(data, str):
+                    st.text(data[:600] + ("…" if len(data) > 600 else ""))
+                else:
+                    st.json(data)
 
     # ── Reliability Tests ─────────────────────────────────────────────────
     st.divider()
